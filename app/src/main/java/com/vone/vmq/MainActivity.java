@@ -32,6 +32,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.google.zxing.activity.CaptureActivity;
+import com.vone.qrcode.BuildConfig;
 import com.vone.qrcode.R;
 import com.vone.vmq.util.Constant;
 
@@ -94,7 +95,7 @@ public class MainActivity extends AppCompatActivity {
             txtkey.setText(" 通讯密钥：" + key);
             isOk = true;
         }
-        Toast.makeText(MainActivity.this, "v免签开源免费免签系统 v2.1", Toast.LENGTH_SHORT).show();
+        Toast.makeText(MainActivity.this, "v免签开源免费免签系统 v" + BuildConfig.VERSION_NAME, Toast.LENGTH_SHORT).show();
 
         // 注册广播接收器
         logBroadcastReceiver = new LogBroadcastReceiver();
