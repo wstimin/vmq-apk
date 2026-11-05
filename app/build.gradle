@@ -7,35 +7,34 @@ android {
         applicationId "com.vone.qrcode"
         minSdkVersion 19
         targetSdkVersion 28
-        versionCode 2
-        versionName "2.1"
+        versionCode Integer.parseInt(System.getenv('VMQ_VERSION_CODE') ?: '310000')
+        versionName System.getenv('VMQ_VERSION_NAME') ?: '3.1.0-wstimin-dev'
         testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
-        //加载资源
-        Properties properties = new Properties()
-        InputStream inputStream = project.rootProject.file('local.properties').newDataInputStream();
-        properties.load(inputStream)
-
-        signConfig {
-            storeFile file(properties.getProperty("STORE_FILE_NAME"))//签名文件路径，
-            storePassword properties.getProperty("KEY_PASSWORD") //密码
-            keyAlias properties.getProperty("STORE_ALIAS")
-            keyPassword properties.getProperty("KEY_PASSWORD")  //密码
+        release {
+            def keystorePath = System.getenv('VMQ_KEYSTORE_FILE')
+            if (keystorePath) {
+                storeFile rootProject.file(keystorePath)
+            }
+            storePassword System.getenv('VMQ_KEYSTORE_PASSWORD')
+            keyAlias System.getenv('VMQ_KEYSTORE_ALIAS')
+            keyPassword System.getenv('VMQ_KEYSTORE_PASSWORD')
         }
     }
     buildTypes {
-        debug {
-            signingConfig signingConfigs.signConfig // 配置debug包的签名,接入微信分享必须验证签名
-        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.signConfig
+            signingConfig signingConfigs.release
         }
     }
     lintOptions {
         abortOnError false
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
     }
 }
 

@@ -1,67 +1,106 @@
-name: Build and release Android APK
+name: Build and publish monitor APK
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      tag_name:
-        description: "为版本创建一个标签，例如 V3.1"
-        required: true
-        type: string
 
 permissions:
   contents: write
 
-env:
-  JAVA_VERSION: "17"
+concurrency:
+  group: vmq-apk-release
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # AGP 8.2 要求 JDK 17；runner 自带 Android SDK，无需配置 sdk.dir
-      - name: Set up JDK 17
+      - name: Set up Java for Android SDK tools
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install matching Android SDK
+        run: sdkmanager 'platforms;android-28' 'build-tools;29.0.3'
+
+      - name: Set up Java for Gradle 6.5
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
           cache: gradle
 
-      # 从仓库 Secrets 还原签名库。必须与历史发布使用同一把 keystore，
-      # 否则老用户无法覆盖安装升级。
-      - name: Restore signing keystore
+      - name: Set version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "name=3.1.0-wstimin.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "code=$((310000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+
+      - name: Restore repository signing key
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        shell: bash
         run: |
           set -euo pipefail
-          test -n "$KEYSTORE_BASE64" || { echo "缺少 Secrets: KEYSTORE_BASE64"; exit 1; }
-          printf '%s' "$KEYSTORE_BASE64" | base64 -d > app/vmqfox.keystore
+          test -n "$KEYSTORE_BASE64"
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/vmq-apk-signing.jks"
 
-      # app/build.gradle 在配置期从根目录 local.properties 读取签名参数，
-      # CI 上该文件不存在会直接失败，故在此按 Secrets 生成（不回显口令）。
-      - name: Generate local.properties
+      - name: Test and build signed APK
         env:
-          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          VMQ_VERSION_NAME: ${{ steps.version.outputs.name }}
+          VMQ_VERSION_CODE: ${{ steps.version.outputs.code }}
+          VMQ_KEYSTORE_FILE: ${{ runner.temp }}/vmq-apk-signing.jks
+          VMQ_KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+          VMQ_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        shell: bash
         run: |
           set -euo pipefail
-          test -n "$KEYSTORE_PASSWORD" || { echo "缺少 Secrets: KEYSTORE_PASSWORD"; exit 1; }
-          cat > local.properties <<EOF
-          STORE_FILE_NAME=vmqfox.keystore
-          STORE_ALIAS=${KEYSTORE_ALIAS}
-          KEY_PASSWORD=${KEYSTORE_PASSWORD}
-          EOF
+          test -n "$VMQ_KEYSTORE_ALIAS"
+          test -n "$VMQ_KEYSTORE_PASSWORD"
+          ./gradlew --no-daemon --console=plain testDebugUnitTest assembleRelease
 
-      - name: Build release APK
-        run: ./gradlew --no-daemon assembleRelease
+      - name: Verify signature and package version
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.name }}
+          EXPECTED_CODE: ${{ steps.version.outputs.code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/release/app-release.apk
+          tools="$ANDROID_HOME/build-tools/29.0.3"
+          "$tools/apksigner" verify --verbose --print-certs "$apk"
+          "$tools/aapt" dump badging "$apk" > "$RUNNER_TEMP/apk-badging.txt"
+          grep -F "name='com.vone.qrcode'" "$RUNNER_TEMP/apk-badging.txt"
+          grep -F "versionName='$EXPECTED_VERSION'" "$RUNNER_TEMP/apk-badging.txt"
+          grep -F "versionCode='$EXPECTED_CODE'" "$RUNNER_TEMP/apk-badging.txt"
+          (cd "$(dirname "$apk")" && sha256sum app-release.apk > SHA256SUMS.txt)
 
-      # 产物路径固定为 app-release.apk，与历史 Release 资产同名，
-      # overwrite_files 允许修订同一 tag 时直接替换旧包。
-      - name: Publish GitHub Release
+      - name: Publish APK to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag_name }}
-          overwrite_files: true
-          files: app/build/outputs/apk/release/app-release.apk
+          tag_name: v${{ steps.version.outputs.name }}
+          name: V免签监控端 ${{ steps.version.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            下载 app-release.apk 安装，SHA256SUMS.txt 用于校验。
+            本仓库使用独立签名。首次从其他作者版本迁移时，先记录服务器连接配置，再卸载旧版安装；之后本仓库各版本之间可直接覆盖升级。
+          files: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/apk/release/SHA256SUMS.txt
+
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/vmq-apk-signing.jks"
