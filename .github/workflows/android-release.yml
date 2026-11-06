@@ -79,7 +79,7 @@ jobs:
           grep -F "name='com.vone.qrcode'" "$RUNNER_TEMP/apk-badging.txt"
           grep -F "versionName='$EXPECTED_VERSION'" "$RUNNER_TEMP/apk-badging.txt"
           grep -F "versionCode='$EXPECTED_CODE'" "$RUNNER_TEMP/apk-badging.txt"
-          grep -F "minSdkVersion:'23'" "$RUNNER_TEMP/apk-badging.txt"
+          grep -E "^(sdkVersion|minSdkVersion):'23'$" "$RUNNER_TEMP/apk-badging.txt"
           grep -F "targetSdkVersion:'34'" "$RUNNER_TEMP/apk-badging.txt"
           python3 scripts/verify_apk_contents.py "$apk"
           (cd "$(dirname "$apk")" && sha256sum app-release.apk > SHA256SUMS.txt)
