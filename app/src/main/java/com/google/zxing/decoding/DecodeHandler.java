@@ -51,14 +51,11 @@ final class DecodeHandler extends Handler {
 
   @Override
   public void handleMessage(Message message) {
-    switch (message.what) {
-      case R.id.decode:
+    if (message.what == R.id.decode) {
         //Log.d(TAG, "Got decode message");
         decode((byte[]) message.obj, message.arg1, message.arg2);
-        break;
-      case R.id.quit:
+    } else if (message.what == R.id.quit) {
         Looper.myLooper().quit();
-        break;
     }
   }
 
@@ -73,7 +70,7 @@ final class DecodeHandler extends Handler {
   private void decode(byte[] data, int width, int height) {
     long start = System.currentTimeMillis();
     Result rawResult = null;
-    
+
     //modify here
     byte[] rotatedData = new byte[data.length];
     for (int y = 0; y < height; y++) {
@@ -83,7 +80,7 @@ final class DecodeHandler extends Handler {
     int tmp = width; // Here we are swapping, that's the difference to #11
     width = height;
     height = tmp;
-    
+
     PlanarYUVLuminanceSource source = CameraManager.get().buildLuminanceSource(rotatedData, width, height);
     BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
     try {

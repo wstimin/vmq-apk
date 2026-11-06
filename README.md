@@ -1,6 +1,8 @@
 # V免签安卓监控端 · wstimin 维护版
 
-源码基于 [hulisang/vmqApk V3.1](https://github.com/hulisang/vmqApk/tree/V3.1)，保留原项目 MIT 许可和版权说明。
+源码基于 [hulisang/vmqApk 的 material-you-style 分支](https://github.com/hulisang/vmqApk/tree/474e95cb963a7f8692126570303e0f88196d2dab)，保留原项目 MIT 许可和版权说明。该分支与原作者约 5.5 MB 的 V3.1 APK 的应用类、SDK 版本和监控协议相符。
+
+早期 `3.1.0-wstimin.1` 至 `.3` 误用了旧 master 源码（SDK 28、MD5 监控签名），不能视为原作者新版 APK 的等价重编译。请升级修正版；本仓库签名保持不变，可以覆盖升级。
 
 ## 下载与自动发布
 
@@ -12,7 +14,7 @@
 
 ## 本地编译
 
-使用 JDK 11、Gradle Wrapper 6.5、Android SDK Platform 28 和 Build Tools 29.0.3。执行 `./gradlew testDebugUnitTest assembleDebug` 可生成调试包，不需要签名配置。
+使用 JDK 17、Gradle Wrapper 8.2、Android SDK Platform 34 和 Build Tools 34.0.0。执行 `./gradlew testDebugUnitTest assembleDebug` 可生成调试包，不需要签名配置。安装要求 Android 6.0 及以上。
 
 正式签名包执行 `./gradlew assembleRelease`，需提供环境变量 `VMQ_KEYSTORE_FILE`（密钥库绝对路径）、`VMQ_KEYSTORE_ALIAS`、`VMQ_KEYSTORE_PASSWORD`。可用 `VMQ_VERSION_NAME` 和 `VMQ_VERSION_CODE` 指定版本。不要将密钥库或密码提交到仓库。
 

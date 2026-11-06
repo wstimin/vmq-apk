@@ -12,10 +12,11 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
-import android.support.v4.app.NotificationCompat;
-import android.text.TextUtils;
+import androidx.core.app.NotificationCompat;
 import android.util.Log;
 import android.widget.Toast;
+import android.content.pm.PackageManager;
+import androidx.core.content.ContextCompat;
 
 import com.vone.qrcode.R;
 
@@ -23,11 +24,8 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Calendar;
-import java.util.Date;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -93,8 +91,8 @@ public class NeNotificationService2 extends NotificationListenerService {
                     key = read.getString("key", "");
 
                     //这里写入子线程需要做的工作
-                    String t = String.valueOf(new Date().getTime());
-                    String sign = md5(t + key);
+                    String t = MonitorSign.timestamp();
+                    String sign = MonitorSign.heartbeat(t, key);
 
                     final String url = "http://" + host + "/api/monitor/heart?t=" + t + "&sign=" + sign;
                     Request request = new Request.Builder().url(url).method("GET", null).build();
@@ -102,28 +100,27 @@ public class NeNotificationService2 extends NotificationListenerService {
                     call.enqueue(new Callback() {
                         @Override
                         public void onFailure(Call call, IOException e) {
-                            // final String error = e.getMessage();
-                            // Toast.makeText(getApplicationContext(), "心跳状态错误，请检查配置是否正确!" + error, Toast.LENGTH_LONG).show();
-                            foregroundHeart(url);
+                            Log.w(TAG, "心跳请求失败: " + e.getMessage());
+                            foregroundHeart(url, 0L);
                         }
 
-                        //请求成功执行的方法
+                        // HTTP 200 仍可能包含业务错误；必须同步校验 PHP 兼容 envelope 的 code。
                         @Override
                         public void onResponse(Call call, Response response) throws IOException {
                             try {
-                                String responseBody = response.body().string();
-                                Log.d(TAG, "心跳服务返回数据: " + responseBody);
-                                Log.d(TAG, "HTTP状态码: " + response.code());
-                                Log.d(TAG, "isSuccessful: " + response.isSuccessful());
+                                MonitorResponse result = MonitorResponse.from(response);
+                                Log.d(TAG, "心跳服务结果: " + result.summary());
+                                if (!result.isSuccessful()) {
+                                    Log.w(TAG, "心跳未被服务端接受，触发前台重试");
+                                    foregroundHeart(url, result.foregroundRetryDelayMillis(0L));
+                                } else {
+                                    Log.d(TAG, "心跳服务请求成功");
+                                }
                             } catch (Exception e) {
                                 Log.e(TAG, "心跳服务解析异常: " + e.getMessage(), e);
-                                e.printStackTrace();
-                            }
-                            if (!response.isSuccessful()) {
-                                Log.d(TAG, "HTTP请求不成功，触发前台心跳");
-                                foregroundHeart(url);
-                            } else {
-                                Log.d(TAG, "心跳服务请求成功");
+                                foregroundHeart(url, 0L);
+                            } finally {
+                                response.close();
                             }
                         }
                     });
@@ -138,135 +135,31 @@ public class NeNotificationService2 extends NotificationListenerService {
         newThread.start(); //启动线程
     }
 
-
-    //当收到一条消息的时候回调，sbn是收到的消息
+    /**
+     * 增强的通知处理方法 - 适配Android 14+的通知变化
+     */
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         Log.d(TAG, "接受到通知消息");
+
+        // Android 14+ 额外的通知验证
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            if (!validateNotificationAccess(sbn)) {
+                Log.w(TAG, "通知访问验证失败，跳过处理");
+                return;
+            }
+        }
+
         writeNotifyToFile(sbn);
+
         // 微信支付部分通知，会调用两次，导致统计不准确
         if ((sbn.getNotification().flags & Notification.FLAG_GROUP_SUMMARY) != 0) {
             Log.d(TAG, "群组摘要通知，忽略");
             return;
         }
-        SharedPreferences read = getSharedPreferences("vone", MODE_PRIVATE);
-        host = read.getString("host", "");
-        key = read.getString("key", "");
 
-        Notification notification = sbn.getNotification();
-        String pkg = sbn.getPackageName();
-        if (notification != null) {
-            Bundle extras = notification.extras;
-            if (extras != null) {
-                CharSequence _title = extras.getCharSequence(NotificationCompat.EXTRA_TITLE, "");
-                CharSequence _content = extras.getCharSequence(NotificationCompat.EXTRA_TEXT, "");
-                Log.d(TAG, "**********************");
-                Log.d(TAG, "包名:" + pkg);
-                Log.d(TAG, "标题:" + _title);
-                Log.d(TAG, "内容:" + _content);
-                Log.d(TAG, "**********************");
-                // to string (企业微信之类的 getString 会出错，换getCharSequence)
-                String title = _title.toString();
-                String content = _content.toString();
-                if ("com.eg.android.AlipayGphone".equals(pkg)) {
-                    if (!content.equals("")) {
-                        if (content.contains("通过扫码向你付款") || content.contains("成功收款")
-                                || title.contains("通过扫码向你付款") || title.contains("成功收款")
-                                || content.contains("店员通") || title.contains("店员通")) {
-                            String money;
-                            // 新版支付宝，会显示积分情况下。先匹配标题上的金额
-                            if (content.contains("商家积分")) {
-                                money = getMoney(title);
-                                if (money == null) {
-                                    money = getMoney(content);
-                                }
-                            } else {
-                                money = getMoney2(title);
-                                if (money == null) {  // 继续使用匹配 xxx元的方式
-                                    money = getMoney2(content);
-                                }
-                                if (money == null) {  // 使用数字匹配的方式
-                                    money = getMoney(content);
-                                }
-                                if (money == null) {
-                                    money = getMoney(title);
-                                }
-                            }
-                            if (money != null) {
-                                Log.d(TAG, "onAccessibilityEvent: 匹配成功： 支付宝 到账 " + money);
-                                final String finalMoney = money;
-                                handler.post(new Runnable() {
-                                    public void run() {
-                                        Toast.makeText(getApplicationContext(), "匹配成功：支付宝到账" + finalMoney + "元", Toast.LENGTH_LONG).show();
-                                    }
-                                });
-                                sendBroadcastLog("匹配成功：支付宝到账 " + money + "元");
-                                try{
-                                    appPush(2, Double.parseDouble(money));
-                                } catch (Exception e) {
-                                    Log.d(TAG, "app push 错误！！！");
-                                }
-                            } else {
-                                handler.post(new Runnable() {
-                                    public void run() {
-                                        Toast.makeText(getApplicationContext(), "监听到支付宝消息但未匹配到金额！", Toast.LENGTH_SHORT).show();
-                                    }
-                                });
-                            }
-                        }
-                    }
-                } else if ("com.tencent.mm".equals(pkg)
-                        || "com.tencent.wework".equals(pkg)) {
-                    if (!content.equals("")) {
-                        // 微信 最新版 8.0.50 开始，对收款通知栏格式做了修改
-                        if (title.equals("微信") || title.equals("微信支付") || title.equals("微信收款助手") || title.equals("微信收款商业版")
-                                || content.contains("微信支付")
-                                || content.contains("微信收款助手")
-                                || content.contains("微信收款商业版")
-                                || (title.equals("对外收款") || title.equals("企业微信")) &&
-                                (content.contains("成功收款") || content.contains("收款通知"))) {
-                            String money = getMoney2(content);
-                            if (money == null) {  // 继续使用匹配 xxx元的方式
-                                money = getMoney2(title);
-                            }
-                            if (money == null) {  // 使用旧版的匹配方式，可能识别错误，不够精准
-                                money = getMoney(content);
-                            }
-                            if (money != null) {
-                                Log.d(TAG, "onAccessibilityEvent: 匹配成功： 微信到账 " + money);
-                                final String finalMoney = money;
-                                handler.post(new Runnable() {
-                                    public void run() {
-                                        Toast.makeText(getApplicationContext(), "匹配成功：微信到账" + finalMoney + "元", Toast.LENGTH_LONG).show();
-                                    }
-                                });
-                                sendBroadcastLog("匹配成功：微信到账 " + money + "元");
-                                try {
-                                    appPush(1, Double.parseDouble(money));
-                                } catch (Exception e) {
-                                    Log.d(TAG, "app push 错误！！！");
-                                }
-                            } else {
-                                handler.post(new Runnable() {
-                                    public void run() {
-                                        Toast.makeText(getApplicationContext(), "监听到微信消息但未匹配到金额！", Toast.LENGTH_SHORT).show();
-                                    }
-                                });
-                            }
-
-                        }
-                    }
-                } else if ("com.vone.qrcode".equals(pkg)) {
-                    if (content.equals("这是一条测试推送信息，如果程序正常，则会提示监听权限正常")) {
-                        handler.post(new Runnable() {
-                            public void run() {
-                                Toast.makeText(getApplicationContext(), "监听正常，如无法正常回调请联系作者反馈！", Toast.LENGTH_SHORT).show();
-                            }
-                        });
-                    }
-                }
-            }
-        }
+        // 继续原有的通知处理逻辑
+        processPaymentNotification(sbn);
     }
 
     //当移除一条消息的时候回调，sbn是被移除的消息
@@ -279,6 +172,13 @@ public class NeNotificationService2 extends NotificationListenerService {
     @Override
     public void onListenerConnected() {
         isRunning = true;
+
+        // Android 14+ 兼容性检查
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            Log.d(TAG, "Android 14+ 检测到，执行兼容性检查");
+            checkAndroid14Compatibility();
+        }
+
         //开启心跳线程
         initAppHeart();
 
@@ -287,6 +187,9 @@ public class NeNotificationService2 extends NotificationListenerService {
                 Toast.makeText(getApplicationContext(), "监听服务开启成功！", Toast.LENGTH_SHORT).show();
             }
         });
+
+        // 发送服务状态广播
+        sendBroadcastLog("通知监听服务已连接，Android版本: " + Build.VERSION.RELEASE);
     }
 
     @Override
@@ -335,45 +238,57 @@ public class NeNotificationService2 extends NotificationListenerService {
         host = read.getString("host", "");
         key = read.getString("key", "");
 
-        String t = String.valueOf(new Date().getTime());
+        String t = MonitorSign.timestamp();
+        String typeText = String.valueOf(type);
+        // 金额文本必须与参与签名的文本完全一致，否则服务端按查询参数重算出的签名不会相等
+        String priceText = MonitorSign.priceText(price);
 
-        String sign = md5(type + "" + price + t + key);
-        final String url = "http://" + host + "/api/monitor/push?t=" + t + "&type=" + type + "&price=" + price + "&sign=" + sign;
+        String sign = MonitorSign.push(typeText, priceText, t, key);
+        final String url = "http://" + host + "/api/monitor/push?t=" + t + "&type=" + typeText + "&price=" + priceText + "&sign=" + sign;
 
-        sendBroadcastLog("准备推送订单: " + url);
+        // 签名属于短期 bearer 凭据，日志只保留脱敏后的请求路径。
+        sendBroadcastLog("准备推送订单: " + Utils.redactMonitorUrl(url));
         Request request = new Request.Builder().url(url).get().build();
         Call call = Utils.getOkHttpClient().newCall(request);
         call.enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
                 sendBroadcastLog("推送失败: " + e.getMessage());
-                foregroundPost(url + "&force_push=true");
+                foregroundPost(url, 0L);
                 releaseWakeLock();
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
-                if (response.isSuccessful()) {
-                    sendBroadcastLog("推送成功，服务器返回: " + response.body().string());
-                } else {
-                    sendBroadcastLog("推送失败，服务器返回: " + response.body().string());
-                    foregroundPost(url + "&force_push=true");
+                try {
+                    MonitorResponse result = MonitorResponse.from(response);
+                    if (result.isSuccessful()) {
+                        sendBroadcastLog("推送成功，服务器结果: " + result.summary());
+                    } else {
+                        sendBroadcastLog("推送未被服务端接受: " + result.summary());
+                        foregroundPost(url, result.foregroundRetryDelayMillis(0L));
+                    }
+                } catch (Exception e) {
+                    sendBroadcastLog("推送响应解析失败: " + e.getMessage());
+                    foregroundPost(url, 0L);
+                } finally {
+                    response.close();
+                    releaseWakeLock();
                 }
-                releaseWakeLock();
-
             }
         });
     }
 
-    private void foregroundHeart(String url) {
+    private void foregroundHeart(String url, long retryAfterMillis) {
         final Context context = NeNotificationService2.this;
         if (isRunning) {
             final JSONObject extraJson = new JSONObject();
             try {
                 extraJson.put("url", url);
                 extraJson.put("show", false);
+                extraJson.put("retry_after_millis", retryAfterMillis);
             } catch (JSONException jsonException) {
-                jsonException.printStackTrace();
+                Log.w(TAG, "编码心跳前台重试参数失败", jsonException);
             }
             handler.post(new Runnable() {
                 @Override
@@ -387,17 +302,18 @@ public class NeNotificationService2 extends NotificationListenerService {
     }
 
     /**
-     * 当通知失败的时候，前台强制通知
+     * 当通知失败的时候，进入前台服务按受控间隔重试。
      */
-    private void foregroundPost(String url) {
+    private void foregroundPost(String url, long retryAfterMillis) {
         final Context context = NeNotificationService2.this;
         if (isRunning) {
             final JSONObject extraJson = new JSONObject();
             try {
                 extraJson.put("url", url);
                 extraJson.put("try_count", 5);
+                extraJson.put("retry_after_millis", retryAfterMillis);
             } catch (JSONException jsonException) {
-                jsonException.printStackTrace();
+                Log.w(TAG, "编码推送前台重试参数失败", jsonException);
             }
             handler.post(new Runnable() {
                 @Override
@@ -466,33 +382,265 @@ public class NeNotificationService2 extends NotificationListenerService {
         }
     }
 
-    public static String md5(String string) {
-        if (TextUtils.isEmpty(string)) {
-            return "";
-        }
-        MessageDigest md5 = null;
-        try {
-            md5 = MessageDigest.getInstance("MD5");
-            byte[] bytes = md5.digest(string.getBytes());
-            StringBuilder result = new StringBuilder();
-            for (byte b : bytes) {
-                String temp = Integer.toHexString(b & 0xff);
-                if (temp.length() == 1) {
-                    temp = "0" + temp;
-                }
-                result.append(temp);
-            }
-            return result.toString();
-        } catch (NoSuchAlgorithmException e) {
-            e.printStackTrace();
-        }
-        return "";
-    }
-
     private void sendBroadcastLog(String logMessage) {
         Intent intent = new Intent(ACTION_LOG_UPDATE);
         intent.putExtra("log_message", logMessage);
         sendBroadcast(intent);
     }
 
+    /**
+     * Android 14+ 兼容性检查
+     * 检查通知监听权限和相关功能的兼容性
+     */
+    private void checkAndroid14Compatibility() {
+        try {
+            // 检查通知监听权限状态
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Android 13+ 通知权限检查
+                int notificationPermission = ContextCompat.checkSelfPermission(
+                    this, android.Manifest.permission.POST_NOTIFICATIONS);
+
+                if (notificationPermission != PackageManager.PERMISSION_GRANTED) {
+                    Log.w(TAG, "Android 13+ 通知权限未授予，可能影响功能");
+                    sendBroadcastLog("警告：通知权限未授予，请在设置中开启");
+                }
+            }
+
+            // 检查通知监听服务权限
+            String enabledListeners = android.provider.Settings.Secure.getString(
+                getContentResolver(), "enabled_notification_listeners");
+
+            if (enabledListeners == null || !enabledListeners.contains(getPackageName())) {
+                Log.w(TAG, "通知监听权限可能未正确配置");
+                sendBroadcastLog("警告：通知监听权限配置异常");
+            } else {
+                Log.d(TAG, "通知监听权限配置正常");
+                sendBroadcastLog("通知监听权限配置正常");
+            }
+
+            // 检查电池优化白名单
+            if (!Utils.checkBatteryWhiteList(this)) {
+                Log.w(TAG, "应用未加入电池优化白名单，可能影响后台运行");
+                sendBroadcastLog("建议：将应用加入电池优化白名单");
+            }
+
+            // 验证支付宝和微信包名的可访问性
+            validatePaymentAppsAccessibility();
+
+        } catch (Exception e) {
+            Log.e(TAG, "Android 14+ 兼容性检查异常: " + e.getMessage(), e);
+            sendBroadcastLog("兼容性检查异常: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 验证支付宝和微信应用的可访问性
+     * 确保通知解析逻辑在新版本上仍然有效
+     */
+    private void validatePaymentAppsAccessibility() {
+        PackageManager pm = getPackageManager();
+
+        // 检查支付宝
+        try {
+            pm.getPackageInfo("com.eg.android.AlipayGphone", PackageManager.GET_ACTIVITIES);
+            Log.d(TAG, "支付宝应用检测正常");
+            sendBroadcastLog("支付宝应用检测正常");
+        } catch (PackageManager.NameNotFoundException e) {
+            Log.w(TAG, "未检测到支付宝应用");
+            sendBroadcastLog("未检测到支付宝应用");
+        }
+
+        // 检查微信
+        try {
+            pm.getPackageInfo("com.tencent.mm", PackageManager.GET_ACTIVITIES);
+            Log.d(TAG, "微信应用检测正常");
+            sendBroadcastLog("微信应用检测正常");
+        } catch (PackageManager.NameNotFoundException e) {
+            Log.w(TAG, "未检测到微信应用");
+            sendBroadcastLog("未检测到微信应用");
+        }
+
+        // 检查企业微信
+        try {
+            pm.getPackageInfo("com.tencent.wework", PackageManager.GET_ACTIVITIES);
+            Log.d(TAG, "企业微信应用检测正常");
+            sendBroadcastLog("企业微信应用检测正常");
+        } catch (PackageManager.NameNotFoundException e) {
+            Log.d(TAG, "未检测到企业微信应用（可选）");
+        }
+    }
+
+    /**
+     * Android 14+ 通知访问验证
+     */
+    private boolean validateNotificationAccess(StatusBarNotification sbn) {
+        try {
+            // 验证通知是否可读
+            if (sbn.getNotification() == null) {
+                return false;
+            }
+
+            // 验证包名是否为目标应用
+            String pkg = sbn.getPackageName();
+            if (pkg == null) {
+                return false;
+            }
+
+            // 只处理支付相关应用的通知
+            return "com.eg.android.AlipayGphone".equals(pkg) ||
+                   "com.tencent.mm".equals(pkg) ||
+                   "com.tencent.wework".equals(pkg) ||
+                   "com.vone.qrcode".equals(pkg);
+
+        } catch (Exception e) {
+            Log.e(TAG, "通知访问验证异常: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 处理支付通知的核心逻辑（从原onNotificationPosted方法中提取）
+     */
+    private void processPaymentNotification(StatusBarNotification sbn) {
+        SharedPreferences read = getSharedPreferences("vone", MODE_PRIVATE);
+        host = read.getString("host", "");
+        key = read.getString("key", "");
+
+        Notification notification = sbn.getNotification();
+        String pkg = sbn.getPackageName();
+        if (notification != null) {
+            Bundle extras = notification.extras;
+            if (extras != null) {
+                CharSequence _title = extras.getCharSequence(NotificationCompat.EXTRA_TITLE, "");
+                CharSequence _content = extras.getCharSequence(NotificationCompat.EXTRA_TEXT, "");
+                Log.d(TAG, "**********************");
+                Log.d(TAG, "包名:" + pkg);
+                Log.d(TAG, "标题:" + _title);
+                Log.d(TAG, "内容:" + _content);
+                Log.d(TAG, "**********************");
+                // to string (企业微信之类的 getString 会出错，换getCharSequence)
+                String title = _title.toString();
+                String content = _content.toString();
+
+                if ("com.eg.android.AlipayGphone".equals(pkg)) {
+                    processAlipayNotification(title, content);
+                } else if ("com.tencent.mm".equals(pkg) || "com.tencent.wework".equals(pkg)) {
+                    processWechatNotification(title, content);
+                } else if ("com.vone.qrcode".equals(pkg)) {
+                    processTestNotification(content);
+                }
+            }
+        }
+    }
+
+    /**
+     * 处理支付宝通知
+     */
+    private void processAlipayNotification(String title, String content) {
+        if (!content.equals("")) {
+            if (content.contains("通过扫码向你付款") || content.contains("成功收款")
+                    || title.contains("通过扫码向你付款") || title.contains("成功收款")
+                    || content.contains("店员通") || title.contains("店员通")) {
+                String money;
+                // 新版支付宝，会显示积分情况下。先匹配标题上的金额
+                if (content.contains("商家积分")) {
+                    money = getMoney(title);
+                    if (money == null) {
+                        money = getMoney(content);
+                    }
+                } else {
+                    money = getMoney2(title);
+                    if (money == null) {  // 继续使用匹配 xxx元的方式
+                        money = getMoney2(content);
+                    }
+                    if (money == null) {  // 使用数字匹配的方式
+                        money = getMoney(content);
+                    }
+                    if (money == null) {
+                        money = getMoney(title);
+                    }
+                }
+                if (money != null) {
+                    Log.d(TAG, "onAccessibilityEvent: 匹配成功： 支付宝 到账 " + money);
+                    final String finalMoney = money;
+                    handler.post(new Runnable() {
+                        public void run() {
+                            Toast.makeText(getApplicationContext(), "匹配成功：支付宝到账" + finalMoney + "元", Toast.LENGTH_LONG).show();
+                        }
+                    });
+                    sendBroadcastLog("匹配成功：支付宝到账 " + money + "元");
+                    try{
+                        appPush(2, Double.parseDouble(money));
+                    } catch (Exception e) {
+                        Log.d(TAG, "app push 错误！！！");
+                    }
+                } else {
+                    handler.post(new Runnable() {
+                        public void run() {
+                            Toast.makeText(getApplicationContext(), "监听到支付宝消息但未匹配到金额！", Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /**
+     * 处理微信通知
+     */
+    private void processWechatNotification(String title, String content) {
+        if (!content.equals("")) {
+            // 微信 最新版 8.0.50 开始，对收款通知栏格式做了修改
+            if (title.equals("微信") || title.equals("微信支付") || title.equals("微信收款助手") || title.equals("微信收款商业版")
+                    || content.contains("微信支付")
+                    || content.contains("微信收款助手")
+                    || content.contains("微信收款商业版")
+                    || (title.equals("对外收款") || title.equals("企业微信")) &&
+                    (content.contains("成功收款") || content.contains("收款通知"))) {
+                String money = getMoney2(content);
+                if (money == null) {  // 继续使用匹配 xxx元的方式
+                    money = getMoney2(title);
+                }
+                if (money == null) {  // 使用旧版的匹配方式，可能识别错误，不够精准
+                    money = getMoney(content);
+                }
+                if (money != null) {
+                    Log.d(TAG, "onAccessibilityEvent: 匹配成功： 微信到账 " + money);
+                    final String finalMoney = money;
+                    handler.post(new Runnable() {
+                        public void run() {
+                            Toast.makeText(getApplicationContext(), "匹配成功：微信到账" + finalMoney + "元", Toast.LENGTH_LONG).show();
+                        }
+                    });
+                    sendBroadcastLog("匹配成功：微信到账 " + money + "元");
+                    try {
+                        appPush(1, Double.parseDouble(money));
+                    } catch (Exception e) {
+                        Log.d(TAG, "app push 错误！！！");
+                    }
+                } else {
+                    handler.post(new Runnable() {
+                        public void run() {
+                            Toast.makeText(getApplicationContext(), "监听到微信消息但未匹配到金额！", Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /**
+     * 处理测试通知
+     */
+    private void processTestNotification(String content) {
+        if (content.equals("这是一条测试推送信息，如果程序正常，则会提示监听权限正常")) {
+            handler.post(new Runnable() {
+                public void run() {
+                    Toast.makeText(getApplicationContext(), "监听正常，如无法正常回调请联系作者反馈！", Toast.LENGTH_SHORT).show();
+                }
+            });
+            // 发送日志广播，将监听状态记录到日志框
+            sendBroadcastLog("监听权限检测结果：监听权限正常");
+        }
+    }
 }
